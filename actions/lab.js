@@ -1,6 +1,6 @@
 "use server";
 
-import { prisma } from "@/lib/prisma";
+import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidatePath } from "next/cache";
 import { guardAction } from "@/lib/guards";
 import { nextSequence } from "@/lib/audit/extension";
@@ -115,7 +115,7 @@ export async function collectSample(orderId) {
 
     const day = istDateString().replace(/-/g, "");
     const accessionNumber = `S${day}-${String(await nextSequence(prisma, `accession-${day}`)).padStart(4, "0")}`;
-    await prisma.$transaction(async (tx) => {
+    await withTransaction(async (tx) => {
       await tx.labOrder.update({ where: { id: order.id, status: "ORDERED" }, data: { status: "COLLECTED", accessionNumber, collectedAt: new Date(), collectedById: user.id } });
       if (order.admission?.status === "ADMITTED" && !order.admission.billFinalizedAt) {
         await tx.admissionCharge.create({

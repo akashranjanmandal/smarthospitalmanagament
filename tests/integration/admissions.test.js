@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { prisma } from "@/lib/prisma";
-import { admitPatient, dischargePatient, getAdmissions, getAdmission, getAdmitFormOptions } from "@/actions/admissions";
+import { admitPatient, dischargePatient, getAdmissions, getAdmission, getAdmitFormOptions, searchAdmittablePatients, transferAdmission } from "@/actions/admissions";
 import { updateBedStatus, getBedDashboardData } from "@/actions/beds";
 import { seedWard } from "../helpers/db";
 import { loginAs } from "../helpers/cookie-jar";
@@ -71,17 +71,48 @@ describe("admitting a patient", () => {
     expect(shown.admission).toMatchObject({ admissionNumber: expect.stringMatching(/^IP-/) });
   });
 
-  it("offers vacant and reserved beds, patients not already admitted, departments and doctors — to admitting staff only", async () => {
+  it("offers vacant and reserved beds, departments and doctors — to admitting staff only, without loading every patient", async () => {
     await admitPatient(admitData());
     const { data } = await getAdmitFormOptions();
     expect(data.beds.map((b) => b.bedNumber)).toEqual(["GW-02", "GW-03"]);
-    expect(data.patients.map((p) => p.id)).not.toContain(h.p1.patient.id);
-    expect(data.patients[0]).toHaveProperty("uhid");
+    // The patient picker is filled by live search (searchAdmittablePatients), not a bulk list.
+    expect(data.patients).toEqual([]);
     expect(data.departments.map((d) => d.name)).toEqual(["Cardiology", "General Medicine"]);
     expect(data.doctors.map((d) => d.id)).toContain(h.doctor.id);
     for (const who of [h.attendant, h.nurse]) {
       await loginAs(who);
       expect((await getAdmitFormOptions()).success).toBe(false);
+    }
+  });
+
+  it("preselects one patient by id, e.g. from a deep link, without loading every other patient", async () => {
+    const { data } = await getAdmitFormOptions({ patientId: h.p2.patient.id });
+    expect(data.patients).toEqual([expect.objectContaining({ id: h.p2.patient.id })]);
+  });
+
+  it("does not preselect a patient who is already admitted", async () => {
+    await admitPatient(admitData());
+    const { data } = await getAdmitFormOptions({ patientId: h.p1.patient.id });
+    expect(data.patients).toEqual([]);
+  });
+});
+
+describe("searching for a patient to admit", () => {
+  it("finds admittable patients by name, UHID or phone, but never one already admitted", async () => {
+    await admitPatient(admitData());
+    const byName = await searchAdmittablePatients(h.p2.patient.firstName);
+    expect(byName.data.map((p) => p.id)).toContain(h.p2.patient.id);
+    expect(byName.data.map((p) => p.id)).not.toContain(h.p1.patient.id);
+
+    expect((await searchAdmittablePatients(h.p2.patient.uhid)).data.map((p) => p.id)).toContain(h.p2.patient.id);
+    expect((await searchAdmittablePatients(h.p2.patient.phone)).data.map((p) => p.id)).toContain(h.p2.patient.id);
+  });
+
+  it("requires at least two characters, and is closed to roles that cannot admit", async () => {
+    expect((await searchAdmittablePatients("a")).data).toEqual([]);
+    for (const who of [h.attendant, h.nurse]) {
+      await loginAs(who);
+      expect((await searchAdmittablePatients(h.p1.patient.firstName)).success).toBe(false);
     }
   });
 });
@@ -150,6 +181,51 @@ describe("discharging a patient", () => {
     await loginAs(h.doctorUser);
     expect((await dischargePatient(admission.id, summary())).success).toBe(true);
     expect(await dischargePatient(admission.id, summary())).toMatchObject({ success: false, message: "This patient has already been discharged" });
+  });
+});
+
+describe("transferring an admitted patient to another bed", () => {
+  let admission;
+
+  beforeEach(async () => {
+    admission = (await admitPatient(admitData())).data;
+  });
+
+  it("moves the stay to the new bed, keeping it one continuous admission", async () => {
+    await loginAs(h.nurse);
+    const res = await transferAdmission(admission.id, { toBedId: h.beds[1].id, reason: "Needs closer monitoring" });
+    expect(res.success).toBe(true);
+
+    const moved = await prisma.admission.findUnique({ where: { id: admission.id } });
+    expect(moved.bedId).toBe(h.beds[1].id); // same admission, not a new one
+
+    const oldBed = await prisma.bed.findUnique({ where: { id: h.beds[0].id } });
+    expect(oldBed).toMatchObject({ status: "NEEDS_CLEANING", patientId: null, departmentId: null, doctorId: null });
+
+    const newBed = await prisma.bed.findUnique({ where: { id: h.beds[1].id } });
+    expect(newBed).toMatchObject({ status: "OCCUPIED", patientId: h.p1.patient.id, departmentId: h.dept.id, doctorId: h.doctor.id });
+
+    const transfer = await prisma.bedTransfer.findFirst({ where: { admissionId: admission.id } });
+    expect(transfer).toMatchObject({ fromBedId: h.beds[0].id, toBedId: h.beds[1].id, reason: "Needs closer monitoring" });
+
+    expect(await prisma.bedStatusLog.count({ where: { bedId: h.beds[1].id, newStatus: "OCCUPIED" } })).toBe(1);
+  });
+
+  it("requires a reason, and refuses a bed that is not available", async () => {
+    await loginAs(h.nurse);
+    expect(await transferAdmission(admission.id, { toBedId: h.beds[1].id, reason: "" })).toMatchObject({ success: false, message: "Enter a reason for the transfer" });
+
+    await prisma.bed.update({ where: { id: h.beds[1].id }, data: { status: "OCCUPIED" } });
+    expect(await transferAdmission(admission.id, { toBedId: h.beds[1].id, reason: "Monitoring" })).toMatchObject({ success: false });
+  });
+
+  it("cannot transfer a discharged stay, or into the same bed", async () => {
+    await loginAs(h.nurse);
+    expect(await transferAdmission(admission.id, { toBedId: h.beds[0].id, reason: "Same bed" })).toMatchObject({ success: false });
+
+    await loginAs(h.doctorUser);
+    await dischargePatient(admission.id, { finalDiagnosis: "Dx", conditionAtDischarge: "STABLE" });
+    expect(await transferAdmission(admission.id, { toBedId: h.beds[1].id, reason: "x" })).toMatchObject({ success: false });
   });
 });
 

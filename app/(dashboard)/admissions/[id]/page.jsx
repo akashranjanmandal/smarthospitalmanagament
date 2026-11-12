@@ -51,6 +51,7 @@ export default async function AdmissionPage({ params }) {
         canAckCritical: ["DOCTOR", "NURSE", "ADMIN", "SUPER_ADMIN"].includes(guard.role),
         canSetDiet: canUpdate("diet", guard.role),
         canRecordIntake: ["NURSE", "ADMIN", "SUPER_ADMIN"].includes(guard.role),
+        canTransferBed: canUpdate("beds", guard.role),
       }}
       meals={meals?.success ? meals.data : null}
       labResults={labResults?.success ? labResults.data : null}

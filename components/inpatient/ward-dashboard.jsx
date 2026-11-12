@@ -5,12 +5,18 @@ import { vitalFlags } from "@/lib/clinical/vitals";
 import { fmtDateTime, fullName } from "@/lib/format";
 import { lengthOfStayDays } from "@/lib/identifiers";
 import { CriticalAlerts } from "@/components/lab/critical-alerts";
+import { branchScope } from "@/lib/branch-scope";
+import { assignedWardIds } from "@/lib/roster";
 
-/** Start-of-shift view for nurses and ward attendants. */
+/** Start-of-shift view for nurses and ward attendants: their own branch, and, once someone has
+ * rostered them today, only their assigned ward(s) within it. */
 export async function WardDashboard({ user, role }) {
+  const wardIds = await assignedWardIds(user.id);
+  const bedWardFilter = wardIds.length > 0 ? { wardId: { in: wardIds } } : { ward: branchScope(user) };
+
   const [admissions, bedCounts, cleaning] = await Promise.all([
     prisma.admission.findMany({
-      where: { status: "ADMITTED" },
+      where: { status: "ADMITTED", bed: bedWardFilter },
       include: {
         patient: { select: { firstName: true, lastName: true, uhid: true } },
         bed: { select: { bedNumber: true, ward: { select: { name: true } } } },
@@ -19,9 +25,9 @@ export async function WardDashboard({ user, role }) {
       },
       orderBy: [{ bed: { ward: { name: "asc" } } }, { bed: { bedNumber: "asc" } }],
     }),
-    prisma.bed.groupBy({ by: ["status"], _count: true }),
+    prisma.bed.groupBy({ by: ["status"], _count: true, where: bedWardFilter }),
     prisma.bed.findMany({
-      where: { status: "NEEDS_CLEANING" },
+      where: { status: "NEEDS_CLEANING", ...bedWardFilter },
       select: { id: true, bedNumber: true, statusUpdatedAt: true, ward: { select: { name: true } } },
       orderBy: { statusUpdatedAt: "asc" },
     }),

@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { prisma } from "@/lib/prisma";
+import { prisma, withTransaction } from "@/lib/prisma";
 import { createDepartment, updateDepartment, deleteDepartment } from "@/actions/departments";
 import { getAuditLogs } from "@/actions/audit";
 import { authenticateUser } from "@/lib/auth";
-import { createUser, PASSWORD } from "../helpers/db";
+import { getPatientById } from "@/actions/patients";
+import { getMedicalRecordById } from "@/actions/medical-records";
+import { createUser, createPatient, createDoctor, PASSWORD } from "../helpers/db";
 import { loginAs } from "../helpers/cookie-jar";
 
 const logsFor = (entity) => prisma.auditLog.findMany({ where: { entity }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
@@ -55,6 +57,47 @@ describe("audit trail", () => {
 
     expect((await getAuditLogs({ action: "DELETE" })).data.total).toBe(0);
     expect((await getAuditLogs({ actorId: admin.id, entity: "Department" })).data.total).toBe(2);
+  });
+
+  it("rolls back its audit entries when the transaction that made them is rolled back", async () => {
+    const admin = await createUser({ role: "ADMIN", firstName: "Asha" });
+    await loginAs(admin);
+    const { data: dept } = await createDepartment({ name: "Oncology" });
+
+    await withTransaction(async (tx) => {
+      await tx.department.update({ where: { id: dept.id }, data: { name: "Oncology & Haematology" } });
+      throw new Error("boom - roll back");
+    }).catch(() => {});
+
+    expect((await prisma.department.findUnique({ where: { id: dept.id } })).name).toBe("Oncology");
+    const logs = await logsFor("Department");
+    expect(logs.map((l) => l.action)).toEqual(["CREATE"]);
+  });
+
+  it("records who viewed a patient's profile, not just who changed it", async () => {
+    const receptionist = await createUser({ role: "RECEPTIONIST" });
+    const p = await createPatient();
+
+    await loginAs(receptionist);
+    expect((await getPatientById(p.patient.id)).success).toBe(true);
+
+    const logs = await prisma.auditLog.findMany({ where: { entity: "Patient", entityId: p.patient.id, action: "VIEW" } });
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ actorId: receptionist.id, actorRole: "RECEPTIONIST" });
+  });
+
+  it("records who viewed a medical record", async () => {
+    const { doctor, user: doctorUser } = await createDoctor();
+    const p = await createPatient();
+    const apt = await prisma.appointment.create({ data: { doctorId: doctor.id, patientId: p.patient.id, appointmentDate: new Date(), appointmentTime: "10:00" } });
+    const record = await prisma.medicalRecord.create({ data: { patientId: p.patient.id, doctorId: doctor.id, appointmentId: apt.id, diagnosis: "Flu", symptoms: "Fever", treatment: "Rest" } });
+
+    await loginAs(doctorUser);
+    expect((await getMedicalRecordById(record.id)).success).toBe(true);
+
+    const logs = await prisma.auditLog.findMany({ where: { entity: "MedicalRecord", entityId: record.id, action: "VIEW" } });
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ actorId: doctorUser.id, actorRole: "DOCTOR" });
   });
 
   it("is closed to everyone except administrators", async () => {

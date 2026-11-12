@@ -31,6 +31,7 @@ import {
   extendRegistrationCode,
 } from "@/actions/registration-codes";
 import { getAllDepartments } from "@/actions/departments";
+import { getBranches } from "@/actions/branches";
 import { Plus, MoreHorizontal, Ban, Clock, Copy, Shield, KeyRound, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import { format } from "date-fns";
@@ -45,8 +46,13 @@ export default function RegistrationCodesPage() {
   const [showResult, setShowResult] = useState(false);
   const [generatedCode, setGeneratedCode] = useState(null);
   const [departments, setDepartments] = useState([]);
+  const [branches, setBranches] = useState([]);
   const [generating, setGenerating] = useState(false);
-  const [formData, setFormData] = useState({ role: "DOCTOR", departmentId: "", expiresInDays: 7 });
+  const [formData, setFormData] = useState({ role: "DOCTOR", departmentId: "", branchId: "", expiresInDays: 7 });
+
+  // Only a super admin (who can see more than one branch) needs to choose one; a branch admin's
+  // codes always go to their own branch automatically.
+  const needsBranchChoice = branches.length > 1;
 
   const fetchCodes = useCallback(async () => {
     setLoading(true);
@@ -62,6 +68,9 @@ export default function RegistrationCodesPage() {
     getAllDepartments().then((res) => {
       if (res.success) setDepartments(res.data);
     });
+    getBranches().then((res) => {
+      if (res.success) setBranches(res.data);
+    });
   }, []);
 
   const handleGenerate = async () => {
@@ -69,6 +78,7 @@ export default function RegistrationCodesPage() {
     const result = await generateRegistrationCode({
       role: formData.role,
       departmentId: formData.departmentId || null,
+      branchId: formData.branchId || null,
       expiresInDays: parseInt(formData.expiresInDays) || 7,
     });
     if (result.success) {
@@ -179,6 +189,12 @@ export default function RegistrationCodesPage() {
               <Label className="font-semibold">Department <span className="text-muted-foreground font-normal">(optional)</span></Label>
               <FormSelect options={[{ value: "", label: "None" }, ...departments.map((d) => ({ value: d.id, label: d.name }))]} onValueChange={(val) => setFormData({ ...formData, departmentId: val })} placeholder="Select department" />
             </div>
+            {needsBranchChoice && (
+              <div className="space-y-2.5">
+                <Label className="font-semibold">Branch <span className="text-destructive">*</span></Label>
+                <FormSelect options={branches.map((b) => ({ value: b.id, label: b.name }))} onValueChange={(val) => setFormData({ ...formData, branchId: val })} placeholder="Select branch" />
+              </div>
+            )}
             <div className="space-y-2.5">
               <Label htmlFor="expiresInDays" className="font-semibold">Expires In (days)</Label>
               <Input id="expiresInDays" type="number" min="1" max="90" value={formData.expiresInDays} onChange={(e) => setFormData({ ...formData, expiresInDays: e.target.value })} className="h-11 rounded-xl bg-background/50 focus-visible:ring-primary/30" />

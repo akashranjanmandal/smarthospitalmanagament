@@ -110,6 +110,15 @@ describe("staff sign-up requires a valid registration code (checked on the serve
     expect(doctor).not.toBeNull();
     expect(doctor.departmentId).toBe(dept.id);
   });
+
+  it("joins the signed-up staff member to the branch their code was issued for", async () => {
+    const dept = await createDepartment("Oncology");
+    const code = await issueCode("NURSE", null);
+    const { body } = await signup({ email: "anita@test.local", phone: "9000000055", role: "NURSE", registrationCodeId: code.id });
+    const newUser = await prisma.user.findUnique({ where: { id: body.user.id } });
+    expect(newUser.branchId).toBe(code.branchId);
+    expect(newUser.branchId).toBeTruthy();
+  });
 });
 
 describe("generating registration codes", () => {

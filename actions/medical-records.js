@@ -3,10 +3,15 @@
 import { prisma } from "@/lib/prisma";
 import { revalidatePath } from "next/cache";
 import { guardAction } from "@/lib/guards";
+import { logView } from "@/lib/audit/extension";
 
 export async function createMedicalRecord(data) {
   try {
     const { user } = await guardAction("medicalRecords", "create");
+
+    // Always attribute the record to the signed-in doctor; never trust a doctorId the client sent.
+    const doctor = await prisma.doctor.findUnique({ where: { userId: user.id }, select: { id: true } });
+    if (!doctor) return { success: false, message: "Only a doctor can create a medical record" };
 
     const existing = await prisma.medicalRecord.findUnique({ where: { appointmentId: data.appointmentId } });
     if (existing) return { success: false, message: "Medical record already exists for this appointment" };
@@ -14,7 +19,7 @@ export async function createMedicalRecord(data) {
     const record = await prisma.medicalRecord.create({
       data: {
         patientId: data.patientId,
-        doctorId: data.doctorId,
+        doctorId: doctor.id,
         appointmentId: data.appointmentId,
         diagnosis: data.diagnosis,
         symptoms: data.symptoms,
@@ -41,6 +46,14 @@ export async function createMedicalRecord(data) {
 export async function updateMedicalRecord(id, data) {
   try {
     const { user } = await guardAction("medicalRecords", "update");
+
+    // A doctor may only edit the record they authored, never a colleague's.
+    const doctor = await prisma.doctor.findUnique({ where: { userId: user.id }, select: { id: true } });
+    const existing = await prisma.medicalRecord.findUnique({ where: { id }, select: { doctorId: true } });
+    if (!existing) return { success: false, message: "Medical record not found" };
+    if (!doctor || existing.doctorId !== doctor.id) {
+      return { success: false, message: "Only the doctor who wrote this record can edit it" };
+    }
 
     const record = await prisma.medicalRecord.update({
       where: { id },
@@ -122,6 +135,7 @@ export async function getMedicalRecordById(id) {
       if (!patient || record.patientId !== patient.id) return { success: false, message: "Access denied" };
     }
 
+    await logView(prisma, "MedicalRecord", record.id);
     return { success: true, data: record };
   } catch (error) {
     if (error.message === "Unauthorized") return { success: false, message: "Unauthorized" };

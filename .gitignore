@@ -40,3 +40,4 @@ scratch/
 
 # prisma generated
 /app/generated/prisma
+.neon

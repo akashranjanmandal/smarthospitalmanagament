@@ -15,10 +15,11 @@ const ACTIONS = [
   ["CREATE", "Created"],
   ["UPDATE", "Updated"],
   ["DELETE", "Deleted"],
+  ["VIEW", "Viewed"],
   ["LOGIN", "Signed in"],
   ["LOGIN_FAILED", "Failed sign-in"],
 ];
-const TONE = { CREATE: "good", UPDATE: "info", DELETE: "bad", LOGIN: "neutral", LOGIN_FAILED: "warn" };
+const TONE = { CREATE: "good", UPDATE: "info", DELETE: "bad", VIEW: "neutral", LOGIN: "neutral", LOGIN_FAILED: "warn" };
 const humanize = (e) => e.replace(/([a-z])([A-Z])/g, "$1 $2");
 
 export function AuditLogView({ data }) {

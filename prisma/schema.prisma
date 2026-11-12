@@ -28,6 +28,31 @@ enum Gender {
   OTHER
 }
 
+enum BranchStatus {
+  ACTIVE
+  INACTIVE
+}
+
+// One hospital in the chain. Staff, departments, wards and beds belong to exactly one branch;
+// patients and their UHID do not — a patient's record follows them to any branch (module M15).
+model Branch {
+  id        String       @id @default(cuid())
+  name      String       @unique
+  code      String       @unique
+  city      String?
+  address   String?
+  phone     String?
+  status    BranchStatus @default(ACTIVE)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  staff             User[]
+  departments       Department[]
+  wards             Ward[]
+  admissions        Admission[]
+  registrationCodes RegistrationCode[]
+}
+
 enum AppointmentStatus {
   SCHEDULED
   COMPLETED
@@ -72,9 +97,13 @@ model User {
   city               String?
   profileComplete    Boolean  @default(false)
   registrationCodeId String?
+  // The one branch this staff member works at. Null for patients (not branch-scoped) and for
+  // SUPER_ADMIN (chain-wide). An ADMIN's branchId is what makes them see only their own branch.
+  branchId           String?
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
+  branch             Branch?                  @relation(fields: [branchId], references: [id])
   doctor             Doctor?
   patient            Patient?
   createdCodes       RegistrationCode[]       @relation("CreatedBy")
@@ -91,6 +120,7 @@ model User {
   clinicalNotes      ClinicalNote[]
   handoversGiven     Handover[]               @relation("HandoverFrom")
   handoversReceived  Handover[]               @relation("HandoverAcknowledgedBy")
+  bedTransfersMade   BedTransfer[]            @relation("TransferredBy")
 }
 
 model OtpCode {
@@ -109,17 +139,21 @@ model OtpCode {
 
 model Department {
   id          String           @id @default(cuid())
-  name        String           @unique
+  name        String
   description String?
   status      DepartmentStatus @default(ACTIVE)
+  branchId    String
   createdAt   DateTime         @default(now())
   updatedAt   DateTime         @updatedAt
 
+  branch     Branch      @relation(fields: [branchId], references: [id])
   doctors    Doctor[]
   wards      Ward[]
   complaints Complaint[]
   beds       Bed[]
   admissions Admission[]
+
+  @@unique([branchId, name])
 }
 
 model Doctor {
@@ -142,6 +176,7 @@ model Doctor {
   complaints     Complaint[]
   beds           Bed[]
   admissions     Admission[]
+  otBookings     OTBooking[]
 }
 
 model Patient {
@@ -174,20 +209,20 @@ model Patient {
 }
 
 model Appointment {
-  id              String            @id @default(cuid())
-  doctorId        String
-  patientId       String
-  appointmentDate DateTime
-  appointmentTime String
-  status          AppointmentStatus @default(SCHEDULED)
-  reason          String?
-  notes           String?
+  id               String            @id @default(cuid())
+  doctorId         String
+  patientId        String
+  appointmentDate  DateTime
+  appointmentTime  String
+  status           AppointmentStatus @default(SCHEDULED)
+  reason           String?
+  notes            String?
   // OPD queue: token issued at check-in (per doctor per day), and when the doctor called the patient in
   tokenNumber      Int?
   checkedInAt      DateTime?
   consultStartedAt DateTime?
-  createdAt       DateTime          @default(now())
-  updatedAt       DateTime          @updatedAt
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
 
   doctor        Doctor         @relation(fields: [doctorId], references: [id])
   patient       Patient        @relation(fields: [patientId], references: [id])
@@ -264,6 +299,10 @@ model RegistrationCode {
   code         String                 @unique
   role         Role
   departmentId String?
+  // Which branch this code's holder will join; set on every new code (KIOSK included) so the
+  // signed-up user is scoped to that branch. Nullable only so codes issued before this existed
+  // keep working.
+  branchId     String?
   status       RegistrationCodeStatus @default(UNUSED)
   expiresAt    DateTime
   createdById  String
@@ -271,8 +310,9 @@ model RegistrationCode {
   createdAt    DateTime               @default(now())
   updatedAt    DateTime               @updatedAt
 
-  createdBy User  @relation("CreatedBy", fields: [createdById], references: [id])
-  usedBy    User? @relation("UsedBy", fields: [usedById], references: [id])
+  createdBy User    @relation("CreatedBy", fields: [createdById], references: [id])
+  usedBy    User?   @relation("UsedBy", fields: [usedById], references: [id])
+  branch    Branch? @relation(fields: [branchId], references: [id])
 }
 
 enum BedStatus {
@@ -300,15 +340,19 @@ enum GenderWard {
 
 model Ward {
   id           String     @id @default(cuid())
-  name         String     @unique
+  name         String
   floor        Int
   departmentId String
+  branchId     String
   genderWard   GenderWard @default(MIXED)
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
   department Department @relation(fields: [departmentId], references: [id])
+  branch     Branch     @relation(fields: [branchId], references: [id])
   beds       Bed[]
+
+  @@unique([branchId, name])
 }
 
 model Bed {
@@ -326,13 +370,15 @@ model Bed {
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
-  ward       Ward           @relation(fields: [wardId], references: [id], onDelete: Cascade)
-  patient    Patient?       @relation(fields: [patientId], references: [id], onDelete: SetNull)
-  department Department?    @relation(fields: [departmentId], references: [id], onDelete: SetNull)
-  doctor     Doctor?        @relation(fields: [doctorId], references: [id], onDelete: SetNull)
-  updatedBy  User?          @relation("BedUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
-  statusLog  BedStatusLog[]
-  admissions Admission[]
+  ward          Ward           @relation(fields: [wardId], references: [id], onDelete: Cascade)
+  patient       Patient?       @relation(fields: [patientId], references: [id], onDelete: SetNull)
+  department    Department?    @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  doctor        Doctor?        @relation(fields: [doctorId], references: [id], onDelete: SetNull)
+  updatedBy     User?          @relation("BedUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+  statusLog     BedStatusLog[]
+  admissions    Admission[]
+  transfersFrom BedTransfer[]  @relation("TransferFrom")
+  transfersTo   BedTransfer[]  @relation("TransferTo")
 
   @@unique([wardId, bedNumber])
 }
@@ -348,6 +394,25 @@ model BedStatusLog {
 
   bed       Bed   @relation(fields: [bedId], references: [id], onDelete: Cascade)
   changedBy User? @relation("BedLogChangedBy", fields: [changedById], references: [id], onDelete: SetNull)
+}
+
+// A ward-to-ward (or bed-to-bed) move of a patient who stays admitted throughout, so the stay,
+// its bill and its clinical record never break the way a discharge-and-readmit would.
+model BedTransfer {
+  id              String   @id @default(cuid())
+  admissionId     String
+  fromBedId       String
+  toBedId         String
+  reason          String
+  transferredById String
+  transferredAt   DateTime @default(now())
+
+  admission     Admission @relation(fields: [admissionId], references: [id], onDelete: Cascade)
+  fromBed       Bed       @relation("TransferFrom", fields: [fromBedId], references: [id])
+  toBed         Bed       @relation("TransferTo", fields: [toBedId], references: [id])
+  transferredBy User      @relation("TransferredBy", fields: [transferredById], references: [id])
+
+  @@index([admissionId])
 }
 
 enum ComplaintType {
@@ -492,6 +557,9 @@ model Admission {
   bedId                String
   departmentId         String
   doctorId             String
+  // Denormalized from the bed's ward at admission time, so chain-wide reporting never has to
+  // join through bed -> ward -> branch just to group stays by branch.
+  branchId             String
   admittedById         String?
   reason               String
   provisionalDiagnosis String?
@@ -530,23 +598,26 @@ model Admission {
   createdAt            DateTime            @default(now())
   updatedAt            DateTime            @updatedAt
 
-  patient      Patient        @relation(fields: [patientId], references: [id])
-  bed          Bed            @relation(fields: [bedId], references: [id])
-  department   Department     @relation(fields: [departmentId], references: [id])
-  doctor       Doctor         @relation(fields: [doctorId], references: [id])
-  admittedBy   User?          @relation("AdmittedBy", fields: [admittedById], references: [id], onDelete: SetNull)
-  dischargedBy User?          @relation("DischargedBy", fields: [dischargedById], references: [id], onDelete: SetNull)
-  vitals       VitalSign[]
-  notes        ClinicalNote[]
-  handovers    Handover[]
-  charges      AdmissionCharge[]
-  payments     AdmissionPayment[]
-  preAuths     PreAuth[]
-  claim        InsuranceClaim?
+  patient          Patient            @relation(fields: [patientId], references: [id])
+  bed              Bed                @relation(fields: [bedId], references: [id])
+  department       Department         @relation(fields: [departmentId], references: [id])
+  doctor           Doctor             @relation(fields: [doctorId], references: [id])
+  branch           Branch             @relation(fields: [branchId], references: [id])
+  admittedBy       User?              @relation("AdmittedBy", fields: [admittedById], references: [id], onDelete: SetNull)
+  dischargedBy     User?              @relation("DischargedBy", fields: [dischargedById], references: [id], onDelete: SetNull)
+  vitals           VitalSign[]
+  notes            ClinicalNote[]
+  handovers        Handover[]
+  charges          AdmissionCharge[]
+  payments         AdmissionPayment[]
+  preAuths         PreAuth[]
+  claim            InsuranceClaim?
   medicationOrders MedicationOrder[]
   pharmacyOrders   PharmacyOrder[]
   labOrders        LabOrder[]
   mealOrders       MealOrder[]
+  bedTransfers     BedTransfer[]
+  otBookings       OTBooking[]
 
   @@index([status])
   @@index([patientId])
@@ -609,12 +680,73 @@ model Handover {
   @@index([admissionId, createdAt])
 }
 
+enum OTStatus {
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+// A booked procedure and its WHO Surgical Safety Checklist (sign-in before anaesthesia, time-out
+// before incision, sign-out before the patient leaves theatre) — each phase is stamped with who
+// confirmed it and when, the way the printed checklist works today.
+model OTBooking {
+  id            String   @id @default(cuid())
+  admissionId   String
+  procedureName String
+  surgeonId     String
+  theatre       String
+  scheduledAt   DateTime
+  status        OTStatus @default(SCHEDULED)
+  notes         String?
+  cancelReason  String?
+
+  signInAt    DateTime?
+  signInById  String?
+  timeOutAt   DateTime?
+  timeOutById String?
+  signOutAt   DateTime?
+  signOutById String?
+
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  admission Admission @relation(fields: [admissionId], references: [id], onDelete: Cascade)
+  surgeon   Doctor    @relation(fields: [surgeonId], references: [id])
+
+  @@index([admissionId])
+  @@index([scheduledAt])
+}
+
 // ─── Platform ────────────────────────────────────────────────────────────────
 
 // Named counters for human-readable numbers (UHID, admission numbers)
 model Sequence {
   name  String @id
   value Int    @default(0)
+}
+
+enum ShiftType {
+  DAY
+  NIGHT
+}
+
+// Which ward a nurse or ward attendant is working in on a given day and shift. No relations (same
+// reasoning as AuditLog): a roster row is a record of a fact, not something that should cascade
+// or be blocked by deleting the user or ward it names.
+model WardAssignment {
+  id          String    @id @default(cuid())
+  userId      String
+  wardId      String
+  date        DateTime
+  shift       ShiftType @default(DAY)
+  createdById String?
+  createdAt   DateTime  @default(now())
+
+  @@unique([userId, wardId, date, shift])
+  @@index([userId, date])
+  @@index([wardId, date])
 }
 
 // Every create / update / delete and every sign-in, kept for administrators
@@ -632,6 +764,19 @@ model AuditLog {
   @@index([createdAt])
   @@index([entity, entityId])
   @@index([actorId])
+}
+
+// Which of a user's synthesized notifications (see actions/notifications.js) they have read,
+// so "read" survives across devices instead of living in one browser's localStorage. No relation
+// to User, same as AuditLog above, so this never blocks or cascades a user's own deletion.
+model NotificationRead {
+  id             String   @id @default(cuid())
+  userId         String
+  notificationId String
+  readAt         DateTime @default(now())
+
+  @@unique([userId, notificationId])
+  @@index([userId])
 }
 
 // ─── Billing and insurance (Phase 3) ────────────────────────────────────────
@@ -698,19 +843,19 @@ model ServiceTariff {
 }
 
 model AdmissionCharge {
-  id           String         @id @default(cuid())
-  admissionId  String
-  tariffId     String?
-  description  String
-  category     ChargeCategory
-  quantity     Float          @default(1)
-  unitPrice    Float
-  gstRate      Float          @default(0)
-  postedById   String?
-  postedAt     DateTime       @default(now())
-  cancelledAt  DateTime?
+  id            String         @id @default(cuid())
+  admissionId   String
+  tariffId      String?
+  description   String
+  category      ChargeCategory
+  quantity      Float          @default(1)
+  unitPrice     Float
+  gstRate       Float          @default(0)
+  postedById    String?
+  postedAt      DateTime       @default(now())
+  cancelledAt   DateTime?
   cancelledById String?
-  cancelReason String?
+  cancelReason  String?
 
   admission Admission      @relation(fields: [admissionId], references: [id], onDelete: Cascade)
   tariff    ServiceTariff? @relation(fields: [tariffId], references: [id], onDelete: SetNull)
@@ -862,20 +1007,20 @@ model PharmacyOrder {
 }
 
 model PharmacyOrderItem {
-  id              String  @id @default(cuid())
-  orderId         String
-  medicineId      String?
-  name            String
-  dose            String?
-  frequency       String?
-  duration        String?
-  quantity        Int
-  unitPrice       Float?
-  gstRate         Float?
-  substitutedFrom String?
+  id               String  @id @default(cuid())
+  orderId          String
+  medicineId       String?
+  name             String
+  dose             String?
+  frequency        String?
+  duration         String?
+  quantity         Int
+  unitPrice        Float?
+  gstRate          Float?
+  substitutedFrom  String?
   substituteReason String?
   // [{ batchId, batchNumber, quantity }] taken from stock
-  allocations     Json?
+  allocations      Json?
 
   order    PharmacyOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
   medicine Medicine?     @relation(fields: [medicineId], references: [id], onDelete: SetNull)

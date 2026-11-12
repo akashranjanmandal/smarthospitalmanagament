@@ -2,6 +2,11 @@ import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 
 const TABLES = [
+  "NotificationRead",
+  "OTBooking",
+  "BedTransfer",
+  "WardAssignment",
+  "Branch",
   "MealOrder", "MenuItem",
   "LabOrder", "LabTest",
   "MedicationAdministration", "MedicationOrder", "PharmacyOrderItem", "PharmacyOrder", "StockBatch", "Medicine",
@@ -21,8 +26,23 @@ export async function resetDb() {
 export const PASSWORD = "Test@1234";
 let seq = 0;
 
-export async function createUser({ role = "PATIENT", email, password = PASSWORD, ...rest } = {}) {
+// One shared branch for tests that don't care about multi-branch: upserted (not cached) because
+// resetDb() truncates it before every test, so a stale cached id would no longer exist.
+const DEFAULT_BRANCH_NAME = "Test Branch";
+export async function defaultBranchId() {
+  const branch = await prisma.branch.upsert({
+    where: { name: DEFAULT_BRANCH_NAME },
+    update: {},
+    create: { name: DEFAULT_BRANCH_NAME, code: "TEST" },
+  });
+  return branch.id;
+}
+
+export async function createUser({ role = "PATIENT", email, password = PASSWORD, branchId, ...rest } = {}) {
   seq += 1;
+  // Every staff role belongs to a branch in production (assigned from their registration code);
+  // patients and the super admin never do.
+  const needsBranch = role !== "PATIENT" && role !== "SUPER_ADMIN";
   return prisma.user.create({
     data: {
       email: email || `${role.toLowerCase()}${seq}@test.local`,
@@ -31,13 +51,14 @@ export async function createUser({ role = "PATIENT", email, password = PASSWORD,
       lastName: rest.lastName || String(seq),
       role,
       profileComplete: true,
+      branchId: branchId !== undefined ? branchId : needsBranch ? await defaultBranchId() : null,
       ...rest,
     },
   });
 }
 
-export async function createDepartment(name = `Dept ${++seq}`) {
-  return prisma.department.create({ data: { name } });
+export async function createDepartment(name = `Dept ${++seq}`, branchId) {
+  return prisma.department.create({ data: { name, branchId: branchId || (await defaultBranchId()) } });
 }
 
 export async function createDoctor({ departmentId, ...userData } = {}) {
@@ -79,7 +100,7 @@ export async function seedWard() {
   const nurse = await createUser({ role: "NURSE", firstName: "Anita", lastName: "Das" });
   const nightNurse = await createUser({ role: "NURSE", firstName: "Rekha", lastName: "Paul" });
   const attendant = await createUser({ role: "WARD_ATTENDANT" });
-  const ward = await prisma.ward.create({ data: { name: "General Ward", floor: 1, departmentId: dept.id } });
+  const ward = await prisma.ward.create({ data: { name: "General Ward", floor: 1, departmentId: dept.id, branchId: dept.branchId } });
   const beds = [];
   for (const n of ["GW-01", "GW-02", "GW-03"]) beds.push(await prisma.bed.create({ data: { wardId: ward.id, bedNumber: n } }));
   const p1 = await createPatient({ firstName: "Sanjay", lastName: "Verma" });

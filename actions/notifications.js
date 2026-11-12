@@ -260,9 +260,50 @@ export async function getUserNotifications() {
     // Sort all combined notifications by date descending
     notifications.sort((a, b) => new Date(b.rawDate || 0) - new Date(a.rawDate || 0));
 
-    return { success: true, data: notifications.slice(0, 10) };
+    const top = notifications.slice(0, 10);
+    // Read state is kept on the server (NotificationRead), not in the browser, so it is the same
+    // on every device the same account signs into.
+    const read = new Set(
+      (await prisma.notificationRead.findMany({
+        where: { userId: user.id, notificationId: { in: top.map((n) => n.id) } },
+        select: { notificationId: true },
+      })).map((r) => r.notificationId)
+    );
+    return { success: true, data: top.map((n) => (read.has(n.id) ? { ...n, unread: false } : n)) };
   } catch (error) {
     console.error("getUserNotifications error:", error);
     return { success: false, data: [] };
+  }
+}
+
+/** Mark specific notifications read for the signed-in user; same ids stay read on any device. */
+export async function markNotificationsRead(ids) {
+  try {
+    const user = await getCurrentUser();
+    if (!user) return { success: false, message: "Unauthorized" };
+    const list = Array.isArray(ids) ? ids.filter(Boolean) : [];
+    if (list.length === 0) return { success: true };
+
+    await prisma.notificationRead.createMany({
+      data: list.map((notificationId) => ({ userId: user.id, notificationId })),
+      skipDuplicates: true,
+    });
+    return { success: true };
+  } catch (error) {
+    console.error("markNotificationsRead error:", error);
+    return { success: false, message: "Failed to update notifications" };
+  }
+}
+
+/** Mark every notification currently shown to the signed-in user as read. */
+export async function markAllNotificationsRead() {
+  try {
+    const user = await getCurrentUser();
+    if (!user) return { success: false, message: "Unauthorized" };
+    const current = await getUserNotifications();
+    return markNotificationsRead(current.data.map((n) => n.id));
+  } catch (error) {
+    console.error("markAllNotificationsRead error:", error);
+    return { success: false, message: "Failed to update notifications" };
   }
 }

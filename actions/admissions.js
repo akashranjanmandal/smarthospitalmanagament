@@ -1,12 +1,14 @@
 "use server";
 
-import { prisma } from "@/lib/prisma";
+import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidatePath } from "next/cache";
 import { guardAction } from "@/lib/guards";
-import { nextSequence } from "@/lib/audit/extension";
+import { nextSequence, logView } from "@/lib/audit/extension";
 import { formatAdmissionNumber } from "@/lib/identifiers";
 import { vitalFlags } from "@/lib/clinical/vitals";
 import { BED_STATUS_LABELS } from "@/lib/constants";
+import { branchScope, resolveBranchId, isChainWide } from "@/lib/branch-scope";
+import { assignedWardIds, ROSTERABLE_ROLES } from "@/lib/roster";
 
 const ADMITTABLE_BED = ["VACANT", "RESERVED"];
 const DISCHARGE_CONDITIONS = ["RECOVERED", "IMPROVED", "STABLE", "REFERRED", "AGAINST_MEDICAL_ADVICE"];
@@ -30,24 +32,28 @@ function refresh() {
   revalidatePath("/dashboard");
 }
 
-export async function getAdmitFormOptions() {
+const ADMITTABLE_PATIENT_SELECT = { id: true, uhid: true, firstName: true, lastName: true, phone: true, gender: true };
+const NOT_ALREADY_ADMITTED = { admissions: { none: { status: "ADMITTED" } } };
+
+export async function getAdmitFormOptions({ patientId } = {}) {
   try {
-    await guardAction("admissions", "create");
+    const { user } = await guardAction("admissions", "create");
+    const branch = branchScope(user);
     const [beds, patients, departments, doctors] = await Promise.all([
       prisma.bed.findMany({
-        where: { status: { in: ADMITTABLE_BED } },
+        where: { status: { in: ADMITTABLE_BED }, ward: branch },
         select: { id: true, bedNumber: true, bedType: true, status: true, ward: { select: { id: true, name: true, floor: true, departmentId: true, genderWard: true } } },
         orderBy: [{ ward: { floor: "asc" } }, { ward: { name: "asc" } }, { bedNumber: "asc" }],
       }),
-      prisma.patient.findMany({
-        where: { admissions: { none: { status: "ADMITTED" } } },
-        select: { id: true, uhid: true, firstName: true, lastName: true, phone: true, gender: true },
-        orderBy: { firstName: "asc" },
-        take: 500,
-      }),
-      prisma.department.findMany({ where: { status: "ACTIVE" }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
+      // The picker is filled by live search (searchAdmittablePatients) instead of loading every
+      // patient; the one exception is a patient already chosen via a deep link (?patientId=...).
+      // Patients are chain-wide, never branch-scoped: any patient can be admitted at any branch.
+      patientId
+        ? prisma.patient.findMany({ where: { id: patientId, ...NOT_ALREADY_ADMITTED }, select: ADMITTABLE_PATIENT_SELECT })
+        : [],
+      prisma.department.findMany({ where: { status: "ACTIVE", ...branch }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
       prisma.doctor.findMany({
-        where: { available: true },
+        where: { available: true, department: branch },
         select: { id: true, departmentId: true, specialization: true, user: { select: { firstName: true, lastName: true } } },
         orderBy: { user: { firstName: "asc" } },
       }),
@@ -66,9 +72,36 @@ export async function getAdmitFormOptions() {
   }
 }
 
+/** Live search for the admit form's patient picker: name, UHID or phone, never a patient already admitted. */
+export async function searchAdmittablePatients(query) {
+  try {
+    await guardAction("admissions", "create");
+    const q = String(query ?? "").trim();
+    if (q.length < 2) return { success: true, data: [] };
+
+    const patients = await prisma.patient.findMany({
+      where: {
+        ...NOT_ALREADY_ADMITTED,
+        OR: [
+          { firstName: { contains: q, mode: "insensitive" } },
+          { lastName: { contains: q, mode: "insensitive" } },
+          { uhid: { contains: q, mode: "insensitive" } },
+          { phone: { contains: q } },
+        ],
+      },
+      select: ADMITTABLE_PATIENT_SELECT,
+      orderBy: { firstName: "asc" },
+      take: 20,
+    });
+    return { success: true, data: patients };
+  } catch (error) {
+    return failed(error, "Search failed");
+  }
+}
+
 export async function admitPatient(data = {}) {
   try {
-    const { user } = await guardAction("admissions", "create");
+    const { user, role } = await guardAction("admissions", "create");
 
     if (!data.patientId) return { success: false, message: "Select the patient" };
     if (!data.bedId) return { success: false, message: "Select a bed" };
@@ -77,15 +110,20 @@ export async function admitPatient(data = {}) {
     if (!data.departmentId) return { success: false, message: "Select the admitting department" };
     if (!data.doctorId) return { success: false, message: "Select the attending doctor" };
 
-    const [patient, bed, doctor] = await Promise.all([
+    const [patient, bed, doctor, department] = await Promise.all([
       prisma.patient.findUnique({ where: { id: data.patientId }, select: { id: true, firstName: true, lastName: true } }),
       prisma.bed.findUnique({ where: { id: data.bedId }, select: { id: true, bedNumber: true, status: true } }),
       prisma.doctor.findUnique({ where: { id: data.doctorId }, select: { departmentId: true } }),
+      prisma.department.findUnique({ where: { id: data.departmentId }, select: { branchId: true } }),
     ]);
     if (!patient) return { success: false, message: "Patient not found" };
     if (!bed) return { success: false, message: "Bed not found" };
     if (!doctor || doctor.departmentId !== data.departmentId) {
       return { success: false, message: "The selected doctor is not in the selected department" };
+    }
+    if (!department) return { success: false, message: "Department not found" };
+    if (!isChainWide(role) && department.branchId !== user.branchId) {
+      return { success: false, message: "That department is not in your branch" };
     }
     if (!ADMITTABLE_BED.includes(bed.status)) {
       return { success: false, message: `Bed ${bed.bedNumber} is not available (${BED_STATUS_LABELS[bed.status]})` };
@@ -101,7 +139,7 @@ export async function admitPatient(data = {}) {
     const year = new Date().getFullYear();
     const admissionNumber = formatAdmissionNumber(year, await nextSequence(prisma, `admission-${year}`));
 
-    const admission = await prisma.$transaction(async (tx) => {
+    const admission = await withTransaction(async (tx) => {
       // Re-check the bed inside the transaction so two desks cannot fill the same bed.
       await tx.bed.update({
         where: { id: bed.id, status: { in: ADMITTABLE_BED } },
@@ -128,6 +166,7 @@ export async function admitPatient(data = {}) {
           admittedById: user.id,
           reason,
           provisionalDiagnosis: data.provisionalDiagnosis?.trim() || null,
+          branchId: department.branchId,
         },
         select: { id: true, admissionNumber: true },
       });
@@ -138,6 +177,84 @@ export async function admitPatient(data = {}) {
   } catch (error) {
     if (error.code === "P2025") return { success: false, message: "That bed was just taken. Please choose another bed." };
     return failed(error, "Failed to admit patient");
+  }
+}
+
+/** Vacant/reserved beds in the admission's own branch, for the transfer dialog. */
+export async function getTransferableBeds(admissionId) {
+  try {
+    await guardAction("beds", "read");
+    const admission = await prisma.admission.findUnique({ where: { id: admissionId }, select: { branchId: true, bedId: true } });
+    if (!admission) return { success: false, data: [] };
+    const beds = await prisma.bed.findMany({
+      where: { status: { in: ADMITTABLE_BED }, ward: { branchId: admission.branchId }, NOT: { id: admission.bedId } },
+      select: { id: true, bedNumber: true, bedType: true, ward: { select: { name: true, floor: true } } },
+      orderBy: [{ ward: { floor: "asc" } }, { bedNumber: "asc" }],
+    });
+    return { success: true, data: beds };
+  } catch {
+    return { success: false, data: [] };
+  }
+}
+
+/**
+ * Move a patient who stays admitted to a different bed (ward transfer, e.g. general ward to
+ * ICU): the stay, its bill and its clinical record stay on the same admission instead of being
+ * broken by a discharge-and-readmit. Guarded on "beds" (ward staff do this), not "admissions".
+ */
+export async function transferAdmission(admissionId, data = {}) {
+  try {
+    const { user, role } = await guardAction("beds", "update");
+
+    const reason = data.reason?.trim();
+    if (!reason) return { success: false, message: "Enter a reason for the transfer" };
+    if (!data.toBedId) return { success: false, message: "Select the bed to transfer to" };
+
+    const admission = await prisma.admission.findUnique({
+      where: { id: admissionId },
+      select: { id: true, admissionNumber: true, status: true, bedId: true, patientId: true, departmentId: true, doctorId: true, branchId: true },
+    });
+    if (!admission) return { success: false, message: "Admission not found" };
+    if (!isChainWide(role) && admission.branchId !== user.branchId) return { success: false, message: "Admission not found" };
+    if (admission.status !== "ADMITTED") return { success: false, message: "This patient is not currently admitted" };
+    if (data.toBedId === admission.bedId) return { success: false, message: "Already in that bed" };
+
+    const [fromBed, toBed] = await Promise.all([
+      prisma.bed.findUnique({ where: { id: admission.bedId }, select: { id: true, status: true } }),
+      prisma.bed.findUnique({ where: { id: data.toBedId }, select: { id: true, bedNumber: true, status: true, ward: { select: { branchId: true } } } }),
+    ]);
+    if (!toBed) return { success: false, message: "Bed not found" };
+    if (toBed.ward.branchId !== admission.branchId) return { success: false, message: "That bed is in a different branch" };
+    if (!ADMITTABLE_BED.includes(toBed.status)) {
+      return { success: false, message: `Bed ${toBed.bedNumber} is not available (${BED_STATUS_LABELS[toBed.status]})` };
+    }
+
+    await withTransaction(async (tx) => {
+      await tx.bed.update({
+        where: { id: fromBed.id, status: "OCCUPIED" },
+        data: { status: "NEEDS_CLEANING", patientId: null, departmentId: null, doctorId: null, notes: `Transferred out, ${admission.admissionNumber}`, statusUpdatedAt: new Date(), updatedById: user.id },
+      });
+      await tx.bedStatusLog.create({
+        data: { bedId: fromBed.id, previousStatus: "OCCUPIED", newStatus: "NEEDS_CLEANING", changedById: user.id, notes: `Transferred to ${toBed.bedNumber} (${admission.admissionNumber})` },
+      });
+      await tx.bed.update({
+        where: { id: toBed.id, status: { in: ADMITTABLE_BED } },
+        data: { status: "OCCUPIED", patientId: admission.patientId, departmentId: admission.departmentId, doctorId: admission.doctorId, notes: null, statusUpdatedAt: new Date(), updatedById: user.id },
+      });
+      await tx.bedStatusLog.create({
+        data: { bedId: toBed.id, previousStatus: toBed.status, newStatus: "OCCUPIED", changedById: user.id, notes: `Transfer in (${admission.admissionNumber}): ${reason}` },
+      });
+      await tx.admission.update({ where: { id: admission.id }, data: { bedId: toBed.id } });
+      await tx.bedTransfer.create({
+        data: { admissionId: admission.id, fromBedId: fromBed.id, toBedId: toBed.id, reason, transferredById: user.id },
+      });
+    });
+
+    refresh();
+    return { success: true, message: `Transferred to bed ${toBed.bedNumber}` };
+  } catch (error) {
+    if (error.code === "P2025") return { success: false, message: "That bed was just taken. Please choose another bed." };
+    return failed(error, "Failed to transfer patient");
   }
 }
 
@@ -188,7 +305,7 @@ export async function dischargePatient(admissionId, data = {}) {
       followUp = { date: new Date(data.followUpDate), time };
     }
 
-    await prisma.$transaction(async (tx) => {
+    await withTransaction(async (tx) => {
       await tx.admission.update({
         where: { id: admission.id },
         data: {
@@ -249,9 +366,25 @@ export async function getAdmissions({ status, search, wardId } = {}) {
   try {
     const { user, role } = await guardAction("admissions", "read");
     const where = {};
+    let rosteredWardIds = null;
     if (role === "PATIENT") where.patient = { userId: user.id };
+    else {
+      Object.assign(where, branchScope(user));
+      // Same roster scoping as the bed board: rostered today, see only those wards; not
+      // rostered yet, see the whole branch.
+      if (ROSTERABLE_ROLES.includes(role)) {
+        const wardIds = await assignedWardIds(user.id);
+        if (wardIds.length > 0) rosteredWardIds = wardIds;
+      }
+    }
     if (status && status !== "all") where.status = status;
-    if (wardId && wardId !== "all") where.bed = { wardId };
+    if (wardId && wardId !== "all") {
+      // An explicit ward filter can only narrow within what the roster already allows, never escape it.
+      if (rosteredWardIds && !rosteredWardIds.includes(wardId)) where.bed = { wardId: "__not_rostered__" };
+      else where.bed = { wardId };
+    } else if (rosteredWardIds) {
+      where.bed = { wardId: { in: rosteredWardIds } };
+    }
     const q = search?.trim();
     if (q) {
       where.OR = [
@@ -298,7 +431,8 @@ export async function getAdmission(id) {
         preAuths: { where: { kind: "FINAL", status: "APPROVED" }, select: { id: true } },
       },
     });
-    if (!admission || (role === "PATIENT" && admission.patient.userId !== user.id)) {
+    const outsideOwnBranch = role !== "PATIENT" && !isChainWide(role) && admission?.branchId !== user.branchId;
+    if (!admission || (role === "PATIENT" && admission.patient.userId !== user.id) || outsideOwnBranch) {
       return { success: false, message: "Admission not found" };
     }
     const patient = { ...admission.patient };
@@ -308,6 +442,7 @@ export async function getAdmission(id) {
     const { preAuths, ...rest } = admission;
     // Cashless stays wait for the insurer's final approval before discharge.
     const awaitingInsurer = admission.payerType !== "SELF" && preAuths.length === 0;
+    await logView(prisma, "Admission", admission.id);
     return {
       success: true,
       data: {

@@ -1,6 +1,6 @@
 "use server";
 
-import { prisma } from "@/lib/prisma";
+import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidatePath } from "next/cache";
 import { guardAction } from "@/lib/guards";
 import { createAndStoreOtp, consumeOtp } from "@/lib/auth/otp";
@@ -91,7 +91,7 @@ export async function kioskRegister(ticket, data = {}) {
       return { success: false, message: "This mobile number belongs to a staff account. Please visit the front desk." };
     }
 
-    const patient = await prisma.$transaction(async (tx) => {
+    const patient = await withTransaction(async (tx) => {
       const account = existing ?? await tx.user.create({
         data: { phone: t.phone, phoneVerified: true, email: `${t.phone}@phone.local`, role: "PATIENT", firstName, lastName, profileComplete: true },
       });

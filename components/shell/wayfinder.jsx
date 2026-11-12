@@ -7,14 +7,13 @@ import { toast } from "sonner";
 import { getNavigationForRole, getPinsForRole, getQuickActionsForRole } from "@/lib/navigation";
 import { getRoleLabel } from "@/lib/roles";
 import { globalSearch } from "@/actions/search";
-import { getUserNotifications } from "@/actions/notifications";
+import { getUserNotifications, markNotificationsRead, markAllNotificationsRead } from "@/actions/notifications";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { Activity, ArrowRight, Bell, BedDouble, CornerDownLeft, Loader2, LogOut, Search, Stethoscope, User, UserRound, X } from "lucide-react";
 
 const HOSPITAL_NAME = process.env.NEXT_PUBLIC_HOSPITAL_NAME || "Smart Hospital";
 const RECENT_KEY = "wayfinder-recent";
-const READ_KEY = "shds_read_notifications";
 const RESULT_ICONS = { patients: UserRound, admissions: BedDouble, doctors: Stethoscope };
 
 const readStore = (key, fallback) => {
@@ -185,11 +184,10 @@ function Notifications({ user }) {
 
   const load = useCallback(async () => {
     try {
+      // Read state (markNotificationsRead / markAllNotificationsRead) lives on the server, so it
+      // is the same on every device this account signs into, not just the browser that read it.
       const res = await getUserNotifications();
-      if (res?.success && Array.isArray(res.data)) {
-        const read = new Set(readStore(READ_KEY, []));
-        setItems(res.data.map((n) => (read.has(n.id) ? { ...n, unread: false } : n)));
-      }
+      if (res?.success && Array.isArray(res.data)) setItems(res.data);
     } catch { /* navigation or network blip */ }
   }, []);
 
@@ -202,8 +200,12 @@ function Notifications({ user }) {
 
   const unread = items.filter((n) => n.unread).length;
   const markRead = (ids) => {
-    writeStore(READ_KEY, [...new Set([...readStore(READ_KEY, []), ...ids])]);
     setItems((list) => list.map((n) => (ids.includes(n.id) ? { ...n, unread: false } : n)));
+    markNotificationsRead(ids);
+  };
+  const markAllRead = () => {
+    setItems((list) => list.map((n) => ({ ...n, unread: false })));
+    markAllNotificationsRead();
   };
 
   return (
@@ -215,7 +217,7 @@ function Notifications({ user }) {
       <DropdownMenuContent side="top" align="end" sideOffset={12} className="w-[min(92vw,380px)] rounded-2xl p-2">
         <div className="flex items-center justify-between px-2 py-1.5">
           <span className="text-sm font-semibold">Notifications</span>
-          {unread > 0 && <button type="button" className="text-xs font-medium text-primary hover:underline" onClick={() => { markRead(items.map((n) => n.id)); toast.success("All marked as read"); }}>Mark all read</button>}
+          {unread > 0 && <button type="button" className="text-xs font-medium text-primary hover:underline" onClick={() => { markAllRead(); toast.success("All marked as read"); }}>Mark all read</button>}
         </div>
         <div className="max-h-[50vh] space-y-0.5 overflow-y-auto">
           {items.length === 0 ? <p className="px-2 py-6 text-center text-sm text-muted-foreground">You’re all caught up.</p> : items.map((n) => (

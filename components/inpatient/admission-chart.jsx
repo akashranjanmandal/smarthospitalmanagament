@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { recordVitals, addClinicalNote, createHandover, acknowledgeHandover } from "@/actions/nursing";
-import { dischargePatient } from "@/actions/admissions";
+import { dischargePatient, getTransferableBeds, transferAdmission } from "@/actions/admissions";
 import { Panel, Chip, Field, VitalFlags, VitalsLine } from "@/components/inpatient/ui";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -48,6 +48,46 @@ function useSubmit() {
   return [busy, run];
 }
 
+/** A bed field with an inline "Transfer" action: pick a vacant bed, give a reason, done — the
+ * patient stays on the same admission, bill and clinical record throughout. */
+function BedField({ admissionId, bed, canTransfer }) {
+  const [open, setOpen] = useState(false);
+  const [beds, setBeds] = useState(null);
+  const [toBedId, setToBedId] = useState("");
+  const [reason, setReason] = useState("");
+  const [busy, submit] = useSubmit();
+
+  const startOpen = async () => {
+    setOpen(true);
+    if (!beds) setBeds((await getTransferableBeds(admissionId)).data ?? []);
+  };
+
+  const doTransfer = () =>
+    submit(() => transferAdmission(admissionId, { toBedId, reason }), () => { setOpen(false); setToBedId(""); setReason(""); });
+
+  return (
+    <div>
+      <Field label="Bed">{bed.bedNumber} · {bed.ward.name}</Field>
+      {canTransfer && !open && <button type="button" onClick={startOpen} className="mt-1 text-xs font-semibold text-primary hover:underline">Transfer to another bed</button>}
+      {open && (
+        <div className="mt-2 space-y-2 rounded-lg border border-border/70 bg-muted/20 p-2.5">
+          <Select value={toBedId} onValueChange={setToBedId}>
+            <SelectTrigger className="h-8 rounded-lg text-xs"><SelectValue placeholder={beds ? `${beds.length} beds available` : "Loading…"} /></SelectTrigger>
+            <SelectContent>
+              {(beds ?? []).map((b) => <SelectItem key={b.id} value={b.id}>{b.bedNumber} · {b.ward.name} (Floor {b.ward.floor})</SelectItem>)}
+            </SelectContent>
+          </Select>
+          <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason, e.g. needs ICU monitoring" className="h-8 rounded-lg text-xs" />
+          <div className="flex gap-2">
+            <Button size="sm" disabled={busy || !toBedId || !reason.trim()} onClick={doTransfer} className="h-7 rounded-lg text-xs">Transfer</Button>
+            <Button size="sm" variant="ghost" onClick={() => setOpen(false)} className="h-7 rounded-lg text-xs">Cancel</Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function AdmissionChart({ admission: a, viewer, bill, tariffs = [], medChart, formulary = [], labResults, labCatalog = [], meals }) {
   const unackedCritical = (labResults ?? []).filter((r) => r.critical && !r.criticalAckAt);
   const admitted = a.status === "ADMITTED";
@@ -80,7 +120,7 @@ export function AdmissionChart({ admission: a, viewer, bill, tariffs = [], medCh
           )}
         </div>
         <dl className="grid grid-cols-2 gap-x-4 gap-y-3 p-4 md:grid-cols-4">
-          <Field label="Bed">{a.bed.bedNumber} · {a.bed.ward.name}</Field>
+          <BedField admissionId={a.id} bed={a.bed} canTransfer={admitted && viewer.canTransferBed} />
           <Field label="Attending doctor">Dr. {fullName(a.doctor.user)}</Field>
           <Field label="Department">{a.department.name}</Field>
           <Field label="Admitted">{fmtDateTime(a.admittedAt)}</Field>

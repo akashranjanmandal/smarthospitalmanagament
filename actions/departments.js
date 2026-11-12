@@ -3,17 +3,21 @@
 import { prisma } from "@/lib/prisma";
 import { revalidatePath } from "next/cache";
 import { guardAction } from "@/lib/guards";
+import { branchScope, resolveBranchId, isChainWide } from "@/lib/branch-scope";
 
 export async function createDepartment(data) {
   try {
     const { user } = await guardAction("departments", "create");
 
-    const existing = await prisma.department.findUnique({
-      where: { name: data.name },
+    const branch = resolveBranchId(user, data.branchId);
+    if (!branch.ok) return { success: false, message: branch.message };
+
+    const existing = await prisma.department.findFirst({
+      where: { name: data.name, branchId: branch.branchId },
     });
 
     if (existing) {
-      return { success: false, message: "Department with this name already exists" };
+      return { success: false, message: "Department with this name already exists in this branch" };
     }
 
     const department = await prisma.department.create({
@@ -21,6 +25,7 @@ export async function createDepartment(data) {
         name: data.name,
         description: data.description || null,
         status: data.status || "ACTIVE",
+        branchId: branch.branchId,
       },
     });
 
@@ -40,12 +45,15 @@ export async function updateDepartment(id, data) {
   try {
     const { user } = await guardAction("departments", "update");
 
+    const current = await prisma.department.findUnique({ where: { id }, select: { branchId: true } });
+    if (!current) return { success: false, message: "Department not found" };
+
     const existing = await prisma.department.findFirst({
-      where: { name: data.name, NOT: { id } },
+      where: { name: data.name, branchId: current.branchId, NOT: { id } },
     });
 
     if (existing) {
-      return { success: false, message: "Department with this name already exists" };
+      return { success: false, message: "Department with this name already exists in this branch" };
     }
 
     const department = await prisma.department.update({
@@ -102,7 +110,7 @@ export async function getDepartments({ search, status, page = 1, limit = 10 } = 
   try {
     const { user } = await guardAction("departments", "read");
 
-    const where = {};
+    const where = { ...branchScope(user) };
 
     if (search) {
       where.OR = [
@@ -142,7 +150,7 @@ export async function getDepartments({ search, status, page = 1, limit = 10 } = 
 
 export async function getDepartmentById(id) {
   try {
-    const { user } = await guardAction("departments", "read");
+    const { user, role } = await guardAction("departments", "read");
 
     const department = await prisma.department.findUnique({
       where: { id },
@@ -155,7 +163,7 @@ export async function getDepartmentById(id) {
       },
     });
 
-    if (!department) {
+    if (!department || (!isChainWide(role) && department.branchId !== user.branchId)) {
       return { success: false, message: "Department not found" };
     }
 
@@ -174,7 +182,7 @@ export async function getAllDepartments() {
     const { user } = await guardAction("departments", "read");
 
     const departments = await prisma.department.findMany({
-      where: { status: "ACTIVE" },
+      where: { status: "ACTIVE", ...branchScope(user) },
       orderBy: { name: "asc" },
     });
 

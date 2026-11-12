@@ -1,8 +1,9 @@
 "use server";
 
-import { prisma } from "@/lib/prisma";
+import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidatePath } from "next/cache";
 import { guardAction } from "@/lib/guards";
+import { logView } from "@/lib/audit/extension";
 import { ensureUser } from "@/lib/auth";
 
 export async function createPatient(data) {
@@ -50,7 +51,7 @@ export async function createPatient(data) {
         },
       });
     } else {
-      patient = await prisma.$transaction(async (tx) => {
+      patient = await withTransaction(async (tx) => {
         const email = data.email?.trim()?.toLowerCase() || null;
         const phone = patientData.phone;
 
@@ -222,6 +223,7 @@ export async function getPatientById(id) {
       return { success: false, message: "You can only view your own profile" };
     }
 
+    await logView(prisma, "Patient", patient.id);
     return { success: true, data: patient };
   } catch (error) {
     if (error.message === "Unauthorized") return { success: false, message: "Unauthorized" };

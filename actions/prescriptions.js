@@ -66,6 +66,14 @@ export async function updatePrescription(id, data) {
   try {
     const { user } = await guardAction("prescriptions", "update");
 
+    // A doctor may only edit the prescription they wrote, never a colleague's.
+    const doctor = await prisma.doctor.findUnique({ where: { userId: user.id }, select: { id: true } });
+    const existing = await prisma.prescription.findUnique({ where: { id }, select: { doctorId: true } });
+    if (!existing) return { success: false, message: "Prescription not found" };
+    if (!doctor || existing.doctorId !== doctor.id) {
+      return { success: false, message: "Only the doctor who wrote this prescription can edit it" };
+    }
+
     await prisma.prescriptionItem.deleteMany({ where: { prescriptionId: id } });
 
     const prescription = await prisma.prescription.update({

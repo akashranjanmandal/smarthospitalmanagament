@@ -4,8 +4,8 @@ import { createDepartment as createDepartmentAction, deleteDepartment } from "@/
 import { createDoctor as createDoctorAction } from "@/actions/doctors";
 import { createPatient as createPatientAction } from "@/actions/patients";
 import { createAppointment, cancelAppointment, completeAppointment, getAppointments } from "@/actions/appointments";
-import { createMedicalRecord } from "@/actions/medical-records";
-import { createPrescription } from "@/actions/prescriptions";
+import { createMedicalRecord, updateMedicalRecord } from "@/actions/medical-records";
+import { createPrescription, updatePrescription } from "@/actions/prescriptions";
 import { createWard, createBed, updateBedStatus } from "@/actions/beds";
 import { admitPatient, dischargePatient } from "@/actions/admissions";
 import { submitPublicFeedback, updateComplaintStatus, escalateComplaint, trackTicketPublic, getFeedbackDashboardData } from "@/actions/feedback";
@@ -65,6 +65,56 @@ describe("appointments", () => {
     expect((await cancelAppointment(theirs.data.id)).success).toBe(false);
     expect((await completeAppointment(mine.data.id)).success).toBe(false);
     expect((await cancelAppointment(mine.data.id)).success).toBe(true);
+  });
+});
+
+describe("a doctor can only edit records and prescriptions they authored", () => {
+  it("always attributes a new medical record to the signed-in doctor, ignoring a client-sent doctorId", async () => {
+    const author = await createDoctor();
+    const someoneElse = await createDoctor({ departmentId: author.doctor.departmentId });
+    const p = await createPatient();
+    const apt = await prisma.appointment.create({ data: { doctorId: author.doctor.id, patientId: p.patient.id, appointmentDate: new Date(), appointmentTime: "10:00" } });
+
+    await loginAs(author.user);
+    // Try to forge another doctor's name onto the record.
+    const record = await createMedicalRecord({ appointmentId: apt.id, patientId: p.patient.id, doctorId: someoneElse.doctor.id, diagnosis: "Flu" });
+    expect(record.success).toBe(true);
+    expect(record.data.doctorId).toBe(author.doctor.id);
+  });
+
+  it("refuses to let a doctor update another doctor's medical record", async () => {
+    const author = await createDoctor();
+    const other = await createDoctor({ departmentId: author.doctor.departmentId });
+    const p = await createPatient();
+    const apt = await prisma.appointment.create({ data: { doctorId: author.doctor.id, patientId: p.patient.id, appointmentDate: new Date(), appointmentTime: "10:00" } });
+    await loginAs(author.user);
+    const record = await createMedicalRecord({ appointmentId: apt.id, patientId: p.patient.id, doctorId: author.doctor.id, diagnosis: "Flu" });
+
+    await loginAs(other.user);
+    const attempt = await updateMedicalRecord(record.data.id, { diagnosis: "Tampered" });
+    expect(attempt.success).toBe(false);
+    expect((await prisma.medicalRecord.findUnique({ where: { id: record.data.id } })).diagnosis).toBe("Flu");
+
+    await loginAs(author.user);
+    expect((await updateMedicalRecord(record.data.id, { diagnosis: "Flu, confirmed" })).success).toBe(true);
+  });
+
+  it("refuses to let a doctor update another doctor's prescription", async () => {
+    const author = await createDoctor();
+    const other = await createDoctor({ departmentId: author.doctor.departmentId });
+    const p = await createPatient();
+    const apt = await prisma.appointment.create({ data: { doctorId: author.doctor.id, patientId: p.patient.id, appointmentDate: new Date(), appointmentTime: "10:00" } });
+    await loginAs(author.user);
+    const record = await createMedicalRecord({ appointmentId: apt.id, patientId: p.patient.id, doctorId: author.doctor.id, diagnosis: "Flu" });
+    const rx = await createPrescription({ medicalRecordId: record.data.id, items: [{ medicineName: "Paracetamol", dosage: "500 mg", frequency: "BD", duration: "3 days" }] });
+
+    await loginAs(other.user);
+    const attempt = await updatePrescription(rx.data.id, { instructions: "Tampered", items: rx.data.items });
+    expect(attempt.success).toBe(false);
+    expect((await prisma.prescription.findUnique({ where: { id: rx.data.id } })).instructions).not.toBe("Tampered");
+
+    await loginAs(author.user);
+    expect((await updatePrescription(rx.data.id, { instructions: "Take with food", items: rx.data.items })).success).toBe(true);
   });
 });
 

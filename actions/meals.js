@@ -1,6 +1,6 @@
 "use server";
 
-import { prisma } from "@/lib/prisma";
+import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidatePath } from "next/cache";
 import { guardAction } from "@/lib/guards";
 import { MEALS, DIET_LABELS, mealCutoff, isOrderOpen, allowedForDiet, standardMeal } from "@/lib/diet/meals";
@@ -224,7 +224,7 @@ export async function markDelivered(orderId) {
     if (order.status === "DELIVERED") return { success: false, message: "Already delivered" };
     if (order.date > istDateString()) return { success: false, message: "This meal is for a later day" };
     if (order.admission.dietType === "NIL_BY_MOUTH") return { success: false, message: "Patient is nil by mouth — do not serve" };
-    await prisma.$transaction(async (tx) => {
+    await withTransaction(async (tx) => {
       await tx.mealOrder.update({ where: { id: orderId }, data: { status: "DELIVERED", deliveredAt: new Date(), deliveredById: user.id } });
       await postExtras(tx, order, user.id);
     });

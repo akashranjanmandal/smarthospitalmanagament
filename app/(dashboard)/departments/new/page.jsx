@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { departmentSchema } from "@/lib/validations";
 import { createDepartment } from "@/actions/departments";
+import { getBranches } from "@/actions/branches";
 import { PageHeader } from "@/components/shared/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -25,6 +26,15 @@ import { Loader2, PlusCircle, Building2 } from "lucide-react";
 export default function NewDepartmentPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
+  const [branches, setBranches] = useState([]);
+  const [branchId, setBranchId] = useState("");
+  // Only a super admin (who can see more than one branch) needs to choose one; a branch admin's
+  // department always goes into their own branch automatically.
+  const needsBranchChoice = branches.length > 1;
+
+  useEffect(() => {
+    getBranches().then((res) => { if (res.success) setBranches(res.data); });
+  }, []);
 
   const {
     register,
@@ -42,7 +52,7 @@ export default function NewDepartmentPage() {
 
   const onSubmit = async (data) => {
     setLoading(true);
-    const result = await createDepartment(data);
+    const result = await createDepartment({ ...data, branchId: branchId || undefined });
     if (result.success) {
       toast.success(result.message);
       router.push("/departments");
@@ -102,6 +112,20 @@ export default function NewDepartmentPage() {
                 <p className="text-sm font-medium text-destructive animate-in slide-in-from-top-1">{errors.description.message}</p>
               )}
             </div>
+
+            {needsBranchChoice && (
+              <div className="space-y-2.5">
+                <Label className="font-semibold text-foreground/80">Branch</Label>
+                <Select onValueChange={setBranchId}>
+                  <SelectTrigger className="h-12 rounded-xl bg-background/50 focus-visible:ring-primary/30 font-medium">
+                    <SelectValue placeholder="Select branch" />
+                  </SelectTrigger>
+                  <SelectContent className="rounded-xl shadow-lg">
+                    {branches.map((b) => <SelectItem key={b.id} value={b.id} className="font-medium">{b.name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
 
             <div className="space-y-2.5">
               <Label className="font-semibold text-foreground/80">Initial Status</Label>

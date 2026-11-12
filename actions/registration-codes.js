@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { guardAction } from "@/lib/guards";
 import crypto from "crypto";
 import { normalizeRegistrationCode } from "@/lib/registration-code";
+import { branchScope, resolveBranchId, isChainWide } from "@/lib/branch-scope";
 
 function generateCode(role) {
   const prefix = { ADMIN: "ADM", DOCTOR: "DOC", RECEPTIONIST: "REC", NURSE: "NUR", WARD_ATTENDANT: "WAT", KIOSK: "KSK", INSURANCE_DESK: "INS", PHARMACIST: "PHA", LAB_TECH: "LAB", KITCHEN: "KIT", PATIENT: "PAT" };
@@ -28,6 +29,12 @@ export async function generateRegistrationCode(data) {
     if (data.role === "DOCTOR" && !data.departmentId) {
       return { success: false, message: "Select a department for doctor registration codes" };
     }
+    if (data.role === "SUPER_ADMIN") {
+      return { success: false, message: "The super admin role cannot be issued as a registration code" };
+    }
+
+    const branch = resolveBranchId(user, data.branchId);
+    if (!branch.ok) return { success: false, message: branch.message };
 
     const code = generateCode(data.role);
     const expiresAt = new Date();
@@ -38,6 +45,7 @@ export async function generateRegistrationCode(data) {
         code,
         role: data.role,
         departmentId: data.departmentId || null,
+        branchId: branch.branchId,
         expiresAt,
         createdById: user.id,
       },
@@ -59,7 +67,7 @@ export async function getRegistrationCodes({ status, role, page = 1, limit = 20 
   try {
     const { user } = await guardAction("departments", "read");
 
-    const where = {};
+    const where = { ...branchScope(user) };
     if (status && status !== "all") where.status = status;
     if (role && role !== "all") where.role = role;
 
@@ -93,7 +101,7 @@ export async function revokeRegistrationCode(id) {
     const { user } = await guardAction("departments", "delete");
 
     const code = await prisma.registrationCode.findUnique({ where: { id } });
-    if (!code) return { success: false, message: "Code not found" };
+    if (!code || (!isChainWide(user.role) && code.branchId !== user.branchId)) return { success: false, message: "Code not found" };
     if (code.status === "USED") return { success: false, message: "Cannot revoke a code that has already been used" };
 
     await prisma.registrationCode.update({
@@ -117,7 +125,7 @@ export async function extendRegistrationCode(id, days) {
     const { user } = await guardAction("departments", "update");
 
     const code = await prisma.registrationCode.findUnique({ where: { id } });
-    if (!code) return { success: false, message: "Code not found" };
+    if (!code || (!isChainWide(user.role) && code.branchId !== user.branchId)) return { success: false, message: "Code not found" };
     if (code.status !== "UNUSED") return { success: false, message: "Can only extend unused codes" };
 
     const newExpiry = new Date(code.expiresAt);

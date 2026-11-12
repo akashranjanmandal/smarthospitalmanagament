@@ -10,7 +10,7 @@ export default async function AdmitPatientPage({ searchParams }) {
   const guard = await guardPage("admissions", "create");
   if (!guard.authorized) redirect(guard.status === 403 ? "/forbidden" : "/sign-in");
   const params = await searchParams;
-  const result = await getAdmitFormOptions();
+  const result = await getAdmitFormOptions({ patientId: params.patientId });
   const options = result.success ? result.data : { beds: [], patients: [], departments: [], doctors: [] };
 
   return (

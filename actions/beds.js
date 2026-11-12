@@ -3,12 +3,23 @@
 import { prisma } from "@/lib/prisma";
 import { revalidatePath } from "next/cache";
 import { guardAction } from "@/lib/guards";
+import { branchScope, isChainWide } from "@/lib/branch-scope";
+import { assignedWardIds, ROSTERABLE_ROLES } from "@/lib/roster";
 
 export async function getBedDashboardData() {
   try {
-    await guardAction("beds", "read");
+    const { user, role } = await guardAction("beds", "read");
+
+    const where = { ...branchScope(user) };
+    // A nurse or ward attendant who has been rostered today sees only their assigned wards; one
+    // nobody has rostered yet still sees the whole branch, so nothing is hidden by default.
+    if (ROSTERABLE_ROLES.includes(role)) {
+      const wardIds = await assignedWardIds(user.id);
+      if (wardIds.length > 0) where.id = { in: wardIds };
+    }
 
     const wards = await prisma.ward.findMany({
+      where,
       include: {
         department: { select: { id: true, name: true } },
         beds: {
@@ -64,9 +75,9 @@ export async function getBedDashboardData() {
 
 export async function getDepartmentsForWard() {
   try {
-    await guardAction("beds", "read");
+    const { user } = await guardAction("beds", "read");
     const departments = await prisma.department.findMany({
-      where: { status: "ACTIVE" },
+      where: { status: "ACTIVE", ...branchScope(user) },
       select: { id: true, name: true },
       orderBy: { name: "asc" },
     });
@@ -192,14 +203,21 @@ export async function deleteSingleBed(bedId) {
 
 export async function createWard(data) {
   try {
-    await guardAction("beds", "create");
+    const { user, role } = await guardAction("beds", "create");
 
-    const existing = await prisma.ward.findUnique({
-      where: { name: data.name },
+    // A ward's branch is always its department's branch, not a separate choice.
+    const department = await prisma.department.findUnique({ where: { id: data.departmentId }, select: { branchId: true } });
+    if (!department) return { success: false, message: "Department not found" };
+    if (!isChainWide(role) && department.branchId !== user.branchId) {
+      return { success: false, message: "That department is not in your branch" };
+    }
+
+    const existing = await prisma.ward.findFirst({
+      where: { name: data.name, branchId: department.branchId },
     });
 
     if (existing) {
-      return { success: false, message: "Ward with this name already exists" };
+      return { success: false, message: "Ward with this name already exists in this branch" };
     }
 
     const ward = await prisma.ward.create({
@@ -207,6 +225,7 @@ export async function createWard(data) {
         name: data.name,
         floor: data.floor,
         departmentId: data.departmentId,
+        branchId: department.branchId,
         genderWard: data.genderWard || "MIXED",
       },
     });
@@ -224,7 +243,13 @@ export async function createWard(data) {
 
 export async function createBed(data) {
   try {
-    await guardAction("beds", "create");
+    const { user, role } = await guardAction("beds", "create");
+
+    const ward = await prisma.ward.findUnique({ where: { id: data.wardId }, select: { branchId: true } });
+    if (!ward) return { success: false, message: "Ward not found" };
+    if (!isChainWide(role) && ward.branchId !== user.branchId) {
+      return { success: false, message: "That ward is not in your branch" };
+    }
 
     const existing = await prisma.bed.findFirst({
       where: {

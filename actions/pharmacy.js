@@ -1,6 +1,6 @@
 "use server";
 
-import { prisma } from "@/lib/prisma";
+import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidatePath } from "next/cache";
 import { guardAction } from "@/lib/guards";
 import { allocateFefo } from "@/lib/pharmacy/stock";
@@ -201,7 +201,7 @@ export async function markReady(orderId) {
     if (short.length) return { success: false, message: `Not enough stock: ${short.join("; ")}` };
 
     let total = 0;
-    await prisma.$transaction(async (tx) => {
+    await withTransaction(async (tx) => {
       for (const { item, allocations } of plans) {
         for (const a of allocations) {
           await tx.stockBatch.update({ where: { id: a.batchId, quantity: { gte: a.quantity } }, data: { quantity: { decrement: a.quantity } } });
@@ -234,7 +234,7 @@ export async function dispense(orderId, { confirmUhid } = {}) {
     if (order.source === "OPD") {
       if (String(confirmUhid ?? "").trim().toUpperCase() !== order.patient.uhid) return { success: false, message: "UHID does not match this order" };
     }
-    await prisma.$transaction(async (tx) => {
+    await withTransaction(async (tx) => {
       if (order.source === "IPD" && order.admissionId) {
         for (const item of order.items) {
           await tx.admissionCharge.create({

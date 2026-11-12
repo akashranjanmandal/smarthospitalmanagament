@@ -1,10 +1,10 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { toast } from "sonner";
-import { admitPatient } from "@/actions/admissions";
+import { admitPatient, searchAdmittablePatients } from "@/actions/admissions";
 import { setPayer } from "@/actions/insurance";
 import { PayerForm } from "@/components/inpatient/insurance-panel";
 import { Panel } from "@/components/inpatient/ui";
@@ -22,9 +22,14 @@ export function AdmitForm({ options, initialBedId, initialPatientId, canSetPayer
   const router = useRouter();
   const { beds, patients, departments, doctors } = options;
   const startBed = beds.find((b) => b.id === initialBedId);
+  const startPatient = patients.find((p) => p.id === initialPatientId);
 
   const [patientQuery, setPatientQuery] = useState("");
-  const [patientId, setPatientId] = useState(patients.some((p) => p.id === initialPatientId) ? initialPatientId : "");
+  const [patientId, setPatientId] = useState(startPatient?.id ?? "");
+  // The picker is filled by live search instead of one eagerly-loaded list of every patient
+  // (that doesn't scale past a few hundred patients); it starts with just the deep-linked one, if any.
+  const [searchResults, setSearchResults] = useState(startPatient ? [startPatient] : []);
+  const [searching, setSearching] = useState(false);
   const [bedId, setBedId] = useState(startBed?.id ?? "");
   const [departmentId, setDepartmentId] = useState(startBed?.ward.departmentId ?? "");
   const [doctorId, setDoctorId] = useState("");
@@ -33,15 +38,23 @@ export function AdmitForm({ options, initialBedId, initialPatientId, canSetPayer
   const [saving, setSaving] = useState(false);
   const [payer, setPayerDraft] = useState({ payerType: "SELF" });
 
+  useEffect(() => {
+    const q = patientQuery.trim();
+    if (q.length < 2) return;
+    setSearching(true);
+    const timer = setTimeout(async () => {
+      const res = await searchAdmittablePatients(q);
+      if (res.success) setSearchResults(res.data);
+      setSearching(false);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [patientQuery]);
+
   const matchingPatients = useMemo(() => {
-    const q = patientQuery.trim().toLowerCase();
-    const list = q
-      ? patients.filter((p) => [fullName(p), p.uhid, p.phone].some((v) => v?.toLowerCase().includes(q)))
-      : patients;
-    // Keep the chosen patient selectable even when the filter hides them
-    const chosen = patients.find((p) => p.id === patientId);
-    return chosen && !list.includes(chosen) ? [chosen, ...list] : list;
-  }, [patients, patientQuery, patientId]);
+    // Keep the chosen patient selectable even once a new search no longer returns them.
+    const chosen = patients.find((p) => p.id === patientId) ?? searchResults.find((p) => p.id === patientId);
+    return chosen && !searchResults.some((p) => p.id === chosen.id) ? [chosen, ...searchResults] : searchResults;
+  }, [patients, searchResults, patientId]);
 
   const departmentDoctors = doctors.filter((d) => d.departmentId === departmentId);
 
@@ -90,16 +103,16 @@ export function AdmitForm({ options, initialBedId, initialPatientId, canSetPayer
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="space-y-1.5">
             <Label htmlFor="patient-search">Find patient</Label>
-            <Input id="patient-search" value={patientQuery} onChange={(e) => setPatientQuery(e.target.value)} placeholder="Name, UHID or phone" className="h-10 rounded-lg" />
+            <Input id="patient-search" value={patientQuery} onChange={(e) => setPatientQuery(e.target.value)} placeholder="Name, UHID or phone (at least 2 letters)" className="h-10 rounded-lg" />
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="admit-patient">Patient</Label>
             <Select value={patientId} onValueChange={setPatientId}>
               <SelectTrigger id="admit-patient" className="h-10 w-full rounded-lg">
-                <SelectValue placeholder={patients.length ? `Select from ${matchingPatients.length} patients` : "No patients available"} />
+                <SelectValue placeholder={searching ? "Searching…" : matchingPatients.length ? `${matchingPatients.length} matching patients` : "Type above to search"} />
               </SelectTrigger>
               <SelectContent>
-                {matchingPatients.slice(0, 100).map((p) => (
+                {matchingPatients.map((p) => (
                   <SelectItem key={p.id} value={p.id}>{fullName(p)} — {p.uhid}</SelectItem>
                 ))}
               </SelectContent>
