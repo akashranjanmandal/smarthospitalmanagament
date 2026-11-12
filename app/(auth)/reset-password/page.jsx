@@ -5,7 +5,6 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { resetPasswordWithToken } from "@/actions/auth-reset";
 import { Button } from "@/components/ui/button";
-import { Brand } from "@/components/auth/brand";
 import { Field, PasswordInput, FormError } from "@/components/auth/fields";
 import { passwordStrength } from "@/lib/password-strength";
 import { AlertCircle, ArrowLeft, CheckCircle2, Loader2 } from "lucide-react";
@@ -89,7 +88,6 @@ function ResetPasswordForm() {
 export default function ResetPasswordPage() {
   return (
     <div className="space-y-7">
-      <Brand className="lg:hidden" />
       <Link href="/sign-in" className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
         <ArrowLeft className="size-4" /> Back to sign in
       </Link>

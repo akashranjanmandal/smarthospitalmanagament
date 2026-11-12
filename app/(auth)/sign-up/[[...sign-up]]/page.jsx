@@ -4,8 +4,7 @@ import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
-import { Brand } from "@/components/auth/brand";
-import { Field, TextInput, PasswordInput, PhoneInput, FormError, Divider, GoogleButton } from "@/components/auth/fields";
+import { Field, TextInput, PasswordInput, PhoneInput, FormError } from "@/components/auth/fields";
 import { verifyRegistrationCode } from "@/actions/registration-codes";
 import { roleFromRegistrationCode, normalizeRegistrationCode } from "@/lib/registration-code";
 import { passwordStrength } from "@/lib/password-strength";
@@ -121,8 +120,6 @@ function PatientSignUp({ onBack }) {
           {busy && <Loader2 className="size-4 animate-spin" />} {busy ? "Creating account…" : "Create account"}
         </Button>
       </form>
-      <Divider>or</Divider>
-      <GoogleButton>Sign up with Google</GoogleButton>
     </div>
   );
 }
@@ -232,7 +229,6 @@ function SignUpFlow() {
 
   return (
     <div className="space-y-7">
-      <Brand className="lg:hidden" />
       <div className="space-y-1.5">
         <h1 className="text-2xl font-bold tracking-tight">Create an account</h1>
         <p className="text-sm text-muted-foreground">Choose the option that describes you.</p>

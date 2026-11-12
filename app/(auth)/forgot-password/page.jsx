@@ -4,7 +4,6 @@ import { useState } from "react";
 import Link from "next/link";
 import { requestPasswordReset } from "@/actions/auth-reset";
 import { Button } from "@/components/ui/button";
-import { Brand } from "@/components/auth/brand";
 import { Field, TextInput, FormError } from "@/components/auth/fields";
 import { ArrowLeft, Loader2, MailCheck } from "lucide-react";
 
@@ -27,7 +26,6 @@ export default function ForgotPasswordPage() {
 
   return (
     <div className="space-y-7">
-      <Brand className="lg:hidden" />
       <Link href="/sign-in" className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
         <ArrowLeft className="size-4" /> Back to sign in
       </Link>
